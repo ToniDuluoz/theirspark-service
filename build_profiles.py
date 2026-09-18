@@ -13,13 +13,31 @@ try:
 except Exception:
     _FNZ = 1
 
-D = "/usr/share/fonts/truetype/dejavu/"
-pdfmetrics.registerFont(TTFont("Serif",   D+"DejaVuSerif.ttf"))
-pdfmetrics.registerFont(TTFont("Serif-B", D+"DejaVuSerif-Bold.ttf"))
-pdfmetrics.registerFont(TTFont("Serif-I", D+"DejaVuSerif-Italic.ttf"))
-pdfmetrics.registerFont(TTFont("Sans",    D+"DejaVuSans.ttf"))
-pdfmetrics.registerFont(TTFont("Sans-B",  D+"DejaVuSans-Bold.ttf"))
-pdfmetrics.registerFont(TTFont("Sans-I",  D+"DejaVuSans-Oblique.ttf"))
+import os as _os
+# Prefer DejaVu fonts bundled next to this file (works on any host, e.g. Render);
+# fall back to the common Linux system path if the bundled folder isn't present.
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CANDS = [_HERE, _os.path.join(_HERE, "fonts"), "/usr/share/fonts/truetype/dejavu"]
+D = next((p for p in _CANDS if _os.path.exists(_os.path.join(p, "DejaVuSerif.ttf"))),
+         "/usr/share/fonts/truetype/dejavu") + "/"
+try:
+    pdfmetrics.registerFont(TTFont("Serif",   D+"DejaVuSerif.ttf"))
+    pdfmetrics.registerFont(TTFont("Serif-B", D+"DejaVuSerif-Bold.ttf"))
+    pdfmetrics.registerFont(TTFont("Serif-I", D+"DejaVuSerif-Italic.ttf"))
+    pdfmetrics.registerFont(TTFont("Sans",    D+"DejaVuSans.ttf"))
+    pdfmetrics.registerFont(TTFont("Sans-B",  D+"DejaVuSans-Bold.ttf"))
+    pdfmetrics.registerFont(TTFont("Sans-I",  D+"DejaVuSans-Oblique.ttf"))
+except Exception as _e:
+    # Last-resort fallback so the app never crashes on boot: alias the code's
+    # font names to reportlab's built-in Type-1 fonts (less pretty, still valid).
+    from reportlab.pdfbase.pdfmetrics import registerFontFamily
+    _std = {"Serif":"Times-Roman","Serif-B":"Times-Bold","Serif-I":"Times-Italic",
+            "Sans":"Helvetica","Sans-B":"Helvetica-Bold","Sans-I":"Helvetica-Oblique"}
+    from reportlab.pdfbase.pdfmetrics import getFont
+    for _alias, _base in _std.items():
+        try: pdfmetrics.registerFont(pdfmetrics.Font(_alias, _base, "WinAnsiEncoding"))
+        except Exception: pass
+    print("build_profiles: DejaVu not found, using built-in fonts:", _e)
 
 INK=HexColor("#23303A"); SAGE=HexColor("#3F6E60"); SAGED=HexColor("#294036")
 SOFT=HexColor("#E7EFEA"); SOFT2=HexColor("#F1F5F2"); IVORY=HexColor("#FBF8F2")
