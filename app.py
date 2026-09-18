@@ -30,11 +30,16 @@ Environment variables (set these on the host — see README):
   CANCEL_URL            where to send the buyer if they cancel
   ALLOW_ORIGIN          the site origin allowed to call /checkout (CORS)
 """
-import os, json, base64, tempfile, traceback
+import os, json, base64, tempfile, traceback, threading
 from flask import Flask, request, jsonify, abort, make_response
 import requests
 import stripe
 import theirspark_generator as G
+
+# Remember which checkout sessions we've already fulfilled, so a Stripe webhook
+# retry (it delivers at-least-once) never sends the PDF email twice.
+_PROCESSED = set()
+_PROCESSED_LOCK = threading.Lock()
 
 # ---- config from environment ------------------------------------------------
 stripe.api_key       = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -102,6 +107,43 @@ def send_email(to_email, child, attachments):
 def health():
     return jsonify(ok=True, service="theirspark", fonts=bool(PRICE_PROFILE))
 
+def _page(emoji, title, body, cta_label="Back to Their Spark", cta_href="https://theirspark.com"):
+    html = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} — Their Spark</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+ body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+   background:#FBF8F2;color:#23303A;font-family:Inter,system-ui,sans-serif;padding:24px}}
+ .card{{max-width:460px;text-align:center;background:#fff;border:1px solid #ECE6DB;border-radius:20px;
+   padding:44px 34px;box-shadow:0 10px 30px rgba(35,48,58,.08)}}
+ .emoji{{font-size:44px;margin-bottom:10px}}
+ h1{{font-family:Fraunces,Georgia,serif;font-weight:600;font-size:27px;margin:0 0 12px;letter-spacing:-.3px}}
+ p{{color:#4a5760;font-size:16px;line-height:1.6;margin:0 0 10px}}
+ .btn{{display:inline-block;margin-top:20px;background:#3F6E60;color:#fff;text-decoration:none;
+   border-radius:12px;padding:14px 22px;font-weight:600;font-size:15px}}
+ .fine{{color:#8a949b;font-size:12.5px;margin-top:18px}}
+</style></head><body><div class="card">
+ <div class="emoji">{emoji}</div><h1>{title}</h1>{body}
+ <a class="btn" href="{cta_href}">{cta_label}</a>
+ <div class="fine">Their Spark · a guidance tool for parents, not a diagnostic or medical assessment.</div>
+</div></body></html>"""
+    return make_response(html, 200, {"Content-Type": "text/html; charset=utf-8"})
+
+@app.get("/thank-you")
+def thank_you():
+    return _page("✨", "Thank you — you're all set!",
+                 "<p>Your child's personalized <b>Strengths Profile</b> is on its way to your email "
+                 "(it can take a couple of minutes). Check your inbox — and your spam folder just in case.</p>")
+
+@app.get("/cancel")
+def cancel():
+    return _page("👋", "Payment cancelled",
+                 "<p>No charge was made. Whenever you're ready, you can complete your child's "
+                 "Strengths Profile — it only takes a moment.</p>",
+                 cta_label="Try again")
+
 @app.route("/checkout", methods=["POST", "OPTIONS"])
 def checkout():
     if request.method == "OPTIONS":
@@ -156,12 +198,24 @@ def webhook():
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        try:
-            _fulfil(session)
-        except Exception:
-            traceback.print_exc()
-            # Return 200 anyway so Stripe doesn't hammer retries; we log the error.
+        sid = session.get("id")
+        with _PROCESSED_LOCK:
+            if sid in _PROCESSED:
+                print("Duplicate webhook for", sid, "- skipping")
+                return "", 200
+            _PROCESSED.add(sid)
+            if len(_PROCESSED) > 5000:   # keep memory bounded
+                _PROCESSED.clear()
+        # Fulfil in the background so Stripe gets an instant 200 (prevents the
+        # slow-response retries that were sending the email twice).
+        threading.Thread(target=_safe_fulfil, args=(session,), daemon=True).start()
     return "", 200
+
+def _safe_fulfil(session):
+    try:
+        _fulfil(session)
+    except Exception:
+        traceback.print_exc()
 
 def _fulfil(session):
     email = ((session.get("customer_details") or {}).get("email")
