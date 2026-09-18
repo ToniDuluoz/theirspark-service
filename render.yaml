@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: theirspark-service
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --timeout 120 --workers 1
+    envVars:
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FROM_EMAIL
+        sync: false
+      - key: PRICE_PROFILE
+        sync: false
+      - key: PRICE_PACK
+        sync: false
+      - key: PRICE_PLAN
+        sync: false
+      - key: SUCCESS_URL
+        sync: false
+      - key: CANCEL_URL
+        sync: false
+      - key: ALLOW_ORIGIN
+        sync: false
