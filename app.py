@@ -113,6 +113,69 @@ def send_email(to_email, child, attachments):
     print("Resend status", r.status_code, r.text[:300])
     r.raise_for_status()
 
+# ---- Resend contacts (the email database) -----------------------------------
+# Every parent who leaves an email is stored in the Resend audience (our master
+# list). last_name carries the status: "Lead" (completed the quiz) or
+# "Customer" (paid). The audience id is discovered once from the API.
+_AUDIENCE_ID = None
+_AUDIENCE_LOCK = threading.Lock()
+
+def _resend_headers():
+    return {"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}
+
+def _audience_id():
+    global _AUDIENCE_ID
+    if _AUDIENCE_ID:
+        return _AUDIENCE_ID
+    with _AUDIENCE_LOCK:
+        if _AUDIENCE_ID:
+            return _AUDIENCE_ID
+        try:
+            r = requests.get("https://api.resend.com/audiences", headers=_resend_headers(), timeout=15)
+            data = (r.json() or {}).get("data") or []
+            if data:
+                _AUDIENCE_ID = data[0]["id"]
+                print("Resend audience:", _AUDIENCE_ID)
+        except Exception:
+            traceback.print_exc()
+    return _AUDIENCE_ID
+
+def save_contact(email, child, status):
+    """Upsert a contact into the Resend audience. status: 'Lead' or 'Customer'.
+    A 'Lead' never downgrades an existing 'Customer'."""
+    email = (email or "").strip()
+    if not email or not RESEND_API_KEY:
+        return
+    aid = _audience_id()
+    if not aid:
+        print("No Resend audience id; contact not saved:", email)
+        return
+    first = child if child and child != "your child" else ""
+    base = f"https://api.resend.com/audiences/{aid}/contacts"
+    try:
+        r = requests.post(base, headers=_resend_headers(),
+                          json={"email": email, "first_name": first,
+                                "last_name": status, "unsubscribed": False}, timeout=15)
+        if r.status_code in (200, 201):
+            print(f"Contact saved ({status}): {email}")
+            return
+        # Already exists. Only upgrade to Customer; never overwrite Customer with Lead.
+        if status == "Customer":
+            u = requests.patch(f"{base}/{email}", headers=_resend_headers(),
+                              json={"first_name": first, "last_name": status,
+                                    "unsubscribed": False}, timeout=15)
+            print(f"Contact upgraded (Customer): {email} [{u.status_code}]")
+        else:
+            print(f"Contact already exists: {email} [{r.status_code}]")
+    except Exception:
+        traceback.print_exc()
+
+def _safe_save(email, child, status):
+    try:
+        save_contact(email, child, status)
+    except Exception:
+        traceback.print_exc()
+
 # ---- routes -----------------------------------------------------------------
 @app.get("/health")
 def health():
@@ -154,6 +217,19 @@ def cancel():
                  "<p>No charge was made. Whenever you're ready, you can complete your child's "
                  "Strengths Profile — it only takes a moment.</p>",
                  cta_label="Try again")
+
+@app.route("/lead", methods=["POST", "OPTIONS"])
+def lead():
+    """Called from the site the moment a parent leaves their email (before paying).
+    Stores them in the audience as a Lead so we never lose the contact."""
+    if request.method == "OPTIONS":
+        return _cors(make_response("", 204))
+    data = request.get_json(force=True, silent=True) or {}
+    email = (data.get("email") or "").strip()
+    child = (data.get("child") or data.get("name") or "").strip()
+    if email:
+        threading.Thread(target=_safe_save, args=(email, child, "Lead"), daemon=True).start()
+    return _cors(jsonify(ok=True))
 
 @app.route("/checkout", methods=["POST", "OPTIONS"])
 def checkout():
@@ -266,6 +342,8 @@ def _fulfil(session):
     if email:
         send_email(email, ans["name"], attachments)
         print(f"Delivered {len(attachments)} PDF(s) to {email} (signature={prof.get('signature')})")
+        # Mark them as a paying Customer in the email database.
+        _safe_save(email, ans["name"], "Customer")
     else:
         print("No email on session; generated but not sent.")
 
