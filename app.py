@@ -35,6 +35,7 @@ from flask import Flask, request, jsonify, abort, make_response
 import requests
 import stripe
 import theirspark_generator as G
+import theirspark_plan as P
 
 # Remember which checkout sessions we've already fulfilled, so a Stripe webhook
 # retry (it delivers at-least-once) never sends the PDF email twice.
@@ -78,12 +79,22 @@ def _clean_answers(d):
 def send_email(to_email, child, attachments):
     """attachments: list of (filename, base64_content)."""
     first = child if child and child != "your child" else "your child"
+    extras = ""
+    names = " ".join(n.lower() for n, _ in attachments)
+    got = []
+    if "everydaypack" in names.replace("-", "").replace("_", ""):
+        got.append("the <b>Everyday Pack</b> (fridge guide + a page to share with their circle)")
+    if "nurtureplan" in names.replace("-", "").replace("_", ""):
+        got.append("the <b>30-day Nurture Plan</b> (one tiny move a day, matched to their strength)")
+    if got:
+        extras = f"<p>You also added {', and '.join(got)} — those PDFs are attached too.</p>"
     html = f"""
       <div style="font-family:Inter,Arial,sans-serif;color:#23303A;line-height:1.6">
         <h2 style="font-family:Georgia,serif;color:#23303A">Here is {first}'s Strengths Profile ✨</h2>
         <p>Thank you — your personalised profile is attached as a PDF.</p>
         <p>Inside you'll find {first}'s signature strength, the blend that shapes
            how they think, feel &amp; connect, and simple ways to nurture it at home.</p>
+        {extras}
         <p style="color:#6B7680;font-size:13px">Their Spark · a guidance tool for parents,
            not a diagnostic or medical assessment.</p>
       </div>"""
@@ -227,14 +238,17 @@ def _fulfil(session):
         "gender": meta.get("gender", ""),
         "scores": json.loads(meta.get("scores") or "{}"),
     }
-    # Did they add the Everyday Pack?
+    # Which add-ons did they buy?
     bought_pack = False
+    bought_plan = False
     try:
         items = stripe.checkout.Session.list_line_items(session["id"], limit=20)
         for it in items.get("data", []):
             price = (it.get("price") or {}).get("id")
             if PRICE_PACK and price == PRICE_PACK:
                 bought_pack = True
+            if PRICE_PLAN and price == PRICE_PLAN:
+                bought_plan = True
     except Exception:
         traceback.print_exc()
 
@@ -245,6 +259,9 @@ def _fulfil(session):
     if bought_pack:
         pack = G.generate_pack(ans, out_dir=outdir)
         attachments.append((os.path.basename(pack["pdf"]), _b64(pack["pdf"])))
+    if bought_plan:
+        plan = P.generate_plan(ans, out_dir=outdir)
+        attachments.append((os.path.basename(plan["pdf"]), _b64(plan["pdf"])))
 
     if email:
         send_email(email, ans["name"], attachments)
